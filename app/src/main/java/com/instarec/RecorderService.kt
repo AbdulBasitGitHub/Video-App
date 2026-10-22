@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
@@ -13,22 +12,16 @@ import android.hardware.display.VirtualDisplay
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.ParcelFileDescriptor
-import android.provider.MediaStore
 import android.view.WindowManager
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * Holds the MediaProjection (approved once) and a VirtualDisplay. Each Instagram
- * session attaches a fresh MediaRecorder surface, then saves the file when it ends.
- */
 class RecorderService : Service() {
 
     companion object {
@@ -44,8 +37,7 @@ class RecorderService : Service() {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var recorder: MediaRecorder? = null
-    private var pfd: ParcelFileDescriptor? = null
-    private var currentUri: Uri? = null
+    private var currentFile: File? = null
     private var width = 1080
     private var height = 1920
     @Volatile private var recording = false
@@ -62,7 +54,6 @@ class RecorderService : Service() {
     }
 
     private fun init(intent: Intent) {
-        // Must be in the foreground BEFORE obtaining the projection (Android 14+).
         startForeground(NOTIF_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
 
         val code = intent.getIntExtra("code", 0)
@@ -78,9 +69,18 @@ class RecorderService : Service() {
         }, Handler(Looper.getMainLooper()))
         projection = proj
 
-        val bounds = getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
-        var w = bounds.width()
-        var h = bounds.height()
+        val wm = getSystemService(WindowManager::class.java)
+        var w: Int
+        var h: Int
+        if (Build.VERSION.SDK_INT >= 30) {
+            val b = wm.maximumWindowMetrics.bounds
+            w = b.width(); h = b.height()
+        } else {
+            val m = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(m)
+            w = m.widthPixels; h = m.heightPixels
+        }
         val scale = minOf(1f, 1080f / minOf(w, h))
         w = ((w * scale).toInt() / 2) * 2
         h = ((h * scale).toInt() / 2) * 2
@@ -98,16 +98,12 @@ class RecorderService : Service() {
         val vd = display ?: return
         if (recording) return
 
+        // App-private folder: not indexed by the Gallery.
+        val base = getExternalFilesDir(null) ?: filesDir
+        val dir = File(base, "Recordings").apply { mkdirs() }
+        runCatching { File(dir, ".nomedia").createNewFile() }
         val name = "IG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, name)
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/InstaRec")
-            put(MediaStore.Video.Media.IS_PENDING, 1)
-        }
-        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return
-        val fd = contentResolver.openFileDescriptor(uri, "w")
-        if (fd == null) { contentResolver.delete(uri, null, null); return }
+        val file = File(dir, name)
 
         try {
             val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this)
@@ -118,14 +114,13 @@ class RecorderService : Service() {
             r.setVideoSize(width, height)
             r.setVideoFrameRate(30)
             r.setVideoEncodingBitRate(8_000_000)
-            r.setOutputFile(fd.fileDescriptor)
+            r.setOutputFile(file.absolutePath)
             r.prepare()
             vd.surface = r.surface
             r.start()
-            recorder = r; pfd = fd; currentUri = uri; recording = true
+            recorder = r; currentFile = file; recording = true
         } catch (e: Exception) {
-            fd.close()
-            contentResolver.delete(uri, null, null)
+            file.delete()
         }
     }
 
@@ -133,20 +128,10 @@ class RecorderService : Service() {
     fun stopRecording() {
         if (!recording) return
         recording = false
-        var ok = true
         display?.surface = null
-        try { recorder?.stop() } catch (e: RuntimeException) { ok = false } // no frames captured
+        try { recorder?.stop() } catch (e: RuntimeException) { currentFile?.delete() }
         recorder?.release(); recorder = null
-        pfd?.close(); pfd = null
-        val uri = currentUri; currentUri = null
-        if (uri != null) {
-            if (ok) {
-                val v = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-                contentResolver.update(uri, v, null, null)
-            } else {
-                contentResolver.delete(uri, null, null)
-            }
-        }
+        currentFile = null
     }
 
     private fun buildNotification(): Notification {

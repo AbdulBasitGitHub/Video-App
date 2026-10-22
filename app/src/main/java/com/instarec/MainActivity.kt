@@ -14,6 +14,7 @@ import android.widget.TextView
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val prefs = getSharedPreferences("crash", MODE_PRIVATE)
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 60, 40, 40)
@@ -44,6 +45,17 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
         add("Stop recorder") { stopService(Intent(this, RecorderService::class.java)) }
+
+        val crash = prefs.getString("last", null)
+        if (crash != null) {
+            col.addView(TextView(this).apply {
+                text = "LAST CRASH (long-press to copy):\n" + crash.take(4000)
+                textSize = 11f
+                setTextIsSelectable(true)
+                setPadding(0, 40, 0, 20)
+            })
+            add("Clear crash log") { prefs.edit().clear().apply(); recreate() }
+        }
         setContentView(ScrollView(this).apply { addView(col) })
     }
 }

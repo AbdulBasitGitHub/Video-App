@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">InstaRec</string>
+    <string name="a11y_desc">Detects when Instagram is opened or closed so the screen recorder can start and stop automatically. It does not read screen content.</string>
+</resources>
